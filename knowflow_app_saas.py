@@ -289,26 +289,18 @@ def ensure_faster_whisper():
                 return False
 
 def supadata_transcribe(video_id: str) -> str:
-    """Transcribe a YouTube video via Supadata API."""
+    """Transcribe a YouTube video via Supadata SDK."""
     api_key = os.environ.get("SUPADATA_API_KEY", "")
     if not api_key:
         return None
     try:
-        resp = requests.get(
-            "https://api.supadata.ai/v1/youtube/transcript",
-            headers={"x-api-key": api_key},
-            params={"videoId": video_id, "text": "true"},
-            timeout=60
-        )
-        if resp.status_code != 200:
-            print(f"Supadata error for {video_id}: {resp.status_code} {resp.text[:200]}")
-            return None
-        data = resp.json()
-        # Response is either {content: "text"} or {content: [{text: ...}]}
-        content = data.get("content", "")
-        if isinstance(content, list):
-            return " ".join(c.get("text", "") for c in content).strip() or None
-        return str(content).strip() or None
+        from supadata import Supadata, SupadataError
+        client = Supadata(api_key=api_key)
+        transcript = client.youtube.transcript(video_id=video_id, text=True)
+        content = transcript.content if hasattr(transcript, 'content') else None
+        if content and len(str(content)) > 100:
+            return str(content).strip()
+        return None
     except Exception as e:
         print(f"Supadata error for {video_id}: {e}")
         return None

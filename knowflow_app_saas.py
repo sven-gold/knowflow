@@ -1023,6 +1023,49 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = urlparse(self.path)
+
+        # ── Raw body endpoints (must be read before read_body()) ──────────────
+        if p.path == "/api/stripe/webhook":
+            length = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(length)
+            sig_header = self.headers.get("Stripe-Signature", "")
+            try:
+                event = handle_stripe_webhook(raw_body, sig_header)
+                event_type = event.get("type", "")
+                obj = event.get("data", {}).get("object", {})
+                if event_type == "checkout.session.completed":
+                    meta = obj.get("metadata", {})
+                    slug = meta.get("slug", "")
+                    plan = meta.get("plan", "creator")
+                    if slug:
+                        update_subscription(
+                            slug=slug,
+                            stripe_customer_id=obj.get("customer", ""),
+                            stripe_subscription_id=obj.get("subscription", ""),
+                            status="active", plan=plan
+                        )
+                        print(f"✅ Subscription aktiviert: {slug} → {plan}")
+                elif event_type in ("customer.subscription.deleted",):
+                    customer_id = obj.get("customer", "")
+                    if customer_id:
+                        update_subscription_by_customer(customer_id, "inactive", "free")
+                self.send_json({"ok": True})
+            except Exception as e:
+                print(f"⚠️ Webhook error: {e}")
+                self.send_json({"error": str(e)}, 400)
+            return
+
+        if p.path == "/api/clerk/webhook":
+            length = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(length)
+            try:
+                payload = json.loads(raw_body)
+                result = handle_clerk_webhook(payload)
+                self.send_json(result)
+            except Exception as e:
+                self.send_json({"error": str(e)}, 400)
+            return
+
         data = self.read_body()
 
         if p.path == "/api/creator/save":
@@ -1324,45 +1367,6 @@ class Handler(BaseHTTPRequestHandler):
                     return_url=f"{base_url}/admin?slug={slug}"
                 )
                 self.send_json({"ok": True, "url": url})
-            except Exception as e:
-                self.send_json({"error": str(e)}, 400)
-
-        elif p.path == "/api/stripe/webhook":
-            length = int(self.headers.get("Content-Length", 0))
-            raw_body = self.rfile.read(length)
-            sig_header = self.headers.get("Stripe-Signature", "")
-            try:
-                event = handle_stripe_webhook(raw_body, sig_header)
-                event_type = event.get("type", "")
-                obj = event.get("data", {}).get("object", {})
-                if event_type == "checkout.session.completed":
-                    meta = obj.get("metadata", {})
-                    slug = meta.get("slug", "")
-                    plan = meta.get("plan", "creator")
-                    if slug:
-                        update_subscription(
-                            slug=slug,
-                            stripe_customer_id=obj.get("customer", ""),
-                            stripe_subscription_id=obj.get("subscription", ""),
-                            status="active", plan=plan
-                        )
-                        print(f"✅ Subscription aktiviert: {slug} → {plan}")
-                elif event_type in ("customer.subscription.deleted",):
-                    customer_id = obj.get("customer", "")
-                    if customer_id:
-                        update_subscription_by_customer(customer_id, "inactive", "free")
-                self.send_json({"ok": True})
-            except Exception as e:
-                print(f"⚠️ Webhook error: {e}")
-                self.send_json({"error": str(e)}, 400)
-
-        elif p.path == "/api/clerk/webhook":
-            length = int(self.headers.get("Content-Length", 0))
-            raw_body = self.rfile.read(length)
-            try:
-                payload = json.loads(raw_body)
-                result = handle_clerk_webhook(payload)
-                self.send_json(result)
             except Exception as e:
                 self.send_json({"error": str(e)}, 400)
 

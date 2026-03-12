@@ -2770,13 +2770,27 @@ async function doLogout() {
 // Handle payment success redirect
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get('payment') === 'success') {
-  setTimeout(() => {
-    const msg = document.createElement('div');
-    msg.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);background:#1a3a1a;border:1px solid rgba(48,209,88,.3);color:#30d158;padding:12px 24px;border-radius:10px;font-size:14px;font-weight:600;z-index:999;box-shadow:0 8px 32px rgba(0,0,0,.5)';
-    msg.textContent = '🎉 Zahlung erfolgreich! Willkommen bei KnowFlow.';
-    document.body.appendChild(msg);
-    setTimeout(() => msg.remove(), 5000);
-  }, 1000);
+  // Webhook may take a few seconds — poll until active
+  let attempts = 0;
+  async function pollForActive() {
+    attempts++;
+    try {
+      const token = await window.Clerk.session.getToken();
+      const res = await fetch('/api/auth/me', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      const d = await res.json();
+      if (d.creator && d.creator.subscription_status === 'active') {
+        // Remove paywall if showing, load dashboard
+        window.location.href = '/admin?slug=' + (d.creator.slug || SLUG);
+        return;
+      }
+    } catch(e) {}
+    if (attempts < 10) {
+      setTimeout(pollForActive, 2000);
+    }
+  }
+  setTimeout(pollForActive, 2000);
 }
 
 // Start auth check then load

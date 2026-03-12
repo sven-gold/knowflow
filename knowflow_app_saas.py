@@ -1017,6 +1017,36 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data_bytes)
 
+
+        elif p.path == "/api/auth/me":
+            token = extract_token_from_headers(self.headers)
+            if not token:
+                self.send_json({"error": "No token"}, 401); return
+            try:
+                import jwt as pyjwt
+                unverified = pyjwt.decode(token, options={"verify_signature": False})
+                user_id = unverified.get("sub", "")
+                email = unverified.get("email", "")
+                if not user_id:
+                    self.send_json({"error": "Invalid token"}, 401); return
+                creator = get_creator_by_clerk_id(user_id)
+                if not creator:
+                    slug = email.split("@")[0].lower().replace(".", "-").replace("_", "-") if email else user_id[-8:]
+                    base_slug = slug
+                    counter = 1
+                    while get_creator(slug):
+                        slug = f"{base_slug}-{counter}"
+                        counter += 1
+                    save_creator(slug, {
+                        "clerk_user_id": user_id,
+                        "email": email,
+                        "channel_name": slug,
+                    })
+                    creator = get_creator(slug)
+                self.send_json({"user": {"user_id": user_id, "email": email}, "creator": creator})
+            except Exception as e:
+                self.send_json({"error": str(e)}, 401)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -1343,12 +1373,13 @@ class Handler(BaseHTTPRequestHandler):
             clerk_user_id = data.get("clerk_user_id", "")
             email = data.get("email", "")
             base_url = data.get("base_url", "http://localhost:7891")
+            success_slug = data.get("success_slug", slug)
             try:
                 url = create_checkout_session(
                     slug=slug, plan=plan,
                     clerk_user_id=clerk_user_id, email=email,
-                    success_url=f"{base_url}/admin?slug={slug}&payment=success",
-                    cancel_url=f"{base_url}/admin?slug={slug}&payment=cancelled"
+                    success_url=f"{base_url}/admin?slug={success_slug}&payment=success",
+                    cancel_url=f"{base_url}/admin?slug={success_slug}&payment=cancelled"
                 )
                 self.send_json({"ok": True, "url": url})
             except Exception as e:
@@ -1370,38 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"error": str(e)}, 400)
 
-        elif p.path == "/api/auth/me":
-            token = extract_token_from_headers(self.headers)
-            if not token:
-                self.send_json({"error": "No token"}, 401); return
-            # Decode JWT without verification to get user info
-            # Full verification happens via Clerk's session API
-            try:
-                import jwt as pyjwt
-                unverified = pyjwt.decode(token, options={"verify_signature": False})
-                user_id = unverified.get("sub", "")
-                email = unverified.get("email", "")
-                if not user_id:
-                    self.send_json({"error": "Invalid token"}, 401); return
-                # Auto-create creator if not exists
-                creator = get_creator_by_clerk_id(user_id)
-                if not creator:
-                    slug = email.split("@")[0].lower().replace(".", "-").replace("_", "-") if email else user_id[-8:]
-                    # Make slug unique
-                    base_slug = slug
-                    counter = 1
-                    while get_creator(slug):
-                        slug = f"{base_slug}-{counter}"
-                        counter += 1
-                    save_creator(slug, {
-                        "clerk_user_id": user_id,
-                        "email": email,
-                        "channel_name": slug,
-                    })
-                    creator = get_creator(slug)
-                self.send_json({"user": {"user_id": user_id, "email": email}, "creator": creator})
-            except Exception as e:
-                self.send_json({"error": str(e)}, 401)
+
 
         else:
             self.send_response(404)
@@ -2736,6 +2736,7 @@ async function startCheckout(email, slug) {
   btn.textContent = 'Weiterleitung...';
   btn.disabled = true;
   try {
+    const baseUrl = window.location.origin;
     const res = await fetch('/api/stripe/checkout', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -2744,7 +2745,8 @@ async function startCheckout(email, slug) {
         plan: 'creator',
         email: email,
         clerk_user_id: window.Clerk.user?.id || '',
-        base_url: window.location.origin
+        base_url: baseUrl,
+        success_slug: slug
       })
     });
     const d = await res.json();

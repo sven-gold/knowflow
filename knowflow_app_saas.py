@@ -2770,27 +2770,8 @@ async function doLogout() {
 // Handle payment success redirect
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get('payment') === 'success') {
-  // Webhook may take a few seconds — poll until active
-  let attempts = 0;
-  async function pollForActive() {
-    attempts++;
-    try {
-      const token = await window.Clerk.session.getToken();
-      const res = await fetch('/api/auth/me', {
-        headers: { 'Authorization': 'Bearer ' + token }
-      });
-      const d = await res.json();
-      if (d.creator && d.creator.subscription_status === 'active') {
-        // Remove paywall if showing, load dashboard
-        window.location.href = '/admin?slug=' + (d.creator.slug || SLUG);
-        return;
-      }
-    } catch(e) {}
-    if (attempts < 10) {
-      setTimeout(pollForActive, 2000);
-    }
-  }
-  setTimeout(pollForActive, 2000);
+  // Wait for webhook to process, then reload
+  setTimeout(() => window.location.reload(), 4000);
 }
 
 // Start auth check then load

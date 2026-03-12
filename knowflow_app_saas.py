@@ -287,33 +287,55 @@ def ensure_faster_whisper():
                 tlog(f"❌ Kein Whisper verfügbar: {e2}", "error")
                 return False
 
-def phase2_whisper(videos_no_yt: list, tmp_base: Path, workers: int) -> dict:
-    """Phase 2: Download audio + Whisper transcribe for videos without YT subtitles."""
+def assemblyai_transcribe(video_id: str) -> str:
+    """Transcribe a YouTube video via AssemblyAI using direct YouTube URL."""
+    api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        headers = {"authorization": api_key, "content-type": "application/json"}
+        youtube_url = f"https://youtube.com/watch?v={video_id}"
+        # Submit job
+        resp = requests.post("https://api.assemblyai.com/v2/transcript",
+            headers=headers,
+            json={"audio_url": youtube_url, "language_detection": True}
+        )
+        if resp.status_code != 200:
+            return None
+        job_id = resp.json().get("id")
+        if not job_id:
+            return None
+        # Poll until done (max 10 min)
+        for _ in range(120):
+            time.sleep(5)
+            poll = requests.get(f"https://api.assemblyai.com/v2/transcript/{job_id}", headers=headers)
+            status = poll.json().get("status")
+            if status == "completed":
+                return poll.json().get("text", "").strip() or None
+            elif status == "error":
+                return None
+        return None
+    except Exception:
+        return None
+
+def phase2_assemblyai(videos_no_yt: list, workers: int = 5) -> dict:
+    """Phase 2: AssemblyAI transcription for videos without YT subtitles."""
     results = {}
     lock = threading.Lock()
     done_c = [0]
     total = len(videos_no_yt)
-    tlog(f"🤖 <b>Phase 2:</b> {total} Videos per Whisper ({workers} parallel)...", "info")
+    tlog(f"🎙️ <b>Phase 2:</b> {total} Videos per AssemblyAI ({workers} parallel)...", "info")
 
     def worker(video):
         vid_id = video["id"]
-        tmp_dir = tmp_base / vid_id
-        tmp_dir.mkdir(exist_ok=True)
-        text = None
-        try:
-            audio = download_audio(vid_id, tmp_dir)
-            if audio:
-                text = whisper_transcribe_file(audio)
-        finally:
-            import shutil as _shutil
-            _shutil.rmtree(tmp_dir, ignore_errors=True)
+        text = assemblyai_transcribe(vid_id)
         with lock:
             results[vid_id] = text
             done_c[0] += 1
             cnt = done_c[0]
         short_t = video["title"][:45] + "…" if len(video["title"]) > 45 else video["title"]
         if text:
-            tlog(f"🤖 {cnt}/{total} — {short_t} — <b>{len(text.split()):,} Wörter</b>", "success")
+            tlog(f"🎙️ {cnt}/{total} — {short_t} — <b>{len(text.split()):,} Wörter</b>", "success")
         else:
             tlog(f"⚠️ {cnt}/{total} — {short_t} — fehlgeschlagen", "warn")
 
@@ -322,7 +344,7 @@ def phase2_whisper(videos_no_yt: list, tmp_base: Path, workers: int) -> dict:
         list(as_completed([ex.submit(worker, v) for v in videos_no_yt]))
 
     ok = sum(1 for v in results.values() if v)
-    tlog(f"✅ Phase 2 fertig: <b>{ok}/{total}</b> per Whisper", "success")
+    tlog(f"✅ Phase 2 fertig: <b>{ok}/{total}</b> per AssemblyAI", "success")
     return results
 
 def run_transcription_bg(slug: str, channel_url: str, max_videos: int):
@@ -375,20 +397,15 @@ def run_transcription_bg(slug: str, channel_url: str, max_videos: int):
         got_yt = total - len(no_yt)
         tlog(f"📊 Phase 1: <b>{got_yt} mit Untertiteln</b> | <b>{len(no_yt)} ohne</b>", "info")
 
-        # ── Phase 2: Whisper für Videos ohne Untertitel ───────────────────────
+        # ── Phase 2: AssemblyAI für Videos ohne Untertitel ───────────────────
         whisper_results = {}
         if no_yt:
-            tlog(f"🤖 Starte Whisper KI für {len(no_yt)} Videos...", "info")
-            if ensure_faster_whisper():
-                import tempfile
-                tmp_base = Path(tempfile.mkdtemp())
-                try:
-                    whisper_results = phase2_whisper(no_yt, tmp_base, workers=3)
-                finally:
-                    import shutil as _shutil
-                    _shutil.rmtree(tmp_base, ignore_errors=True)
+            assembly_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+            if assembly_key:
+                tlog(f"🤖 Starte AssemblyAI für {len(no_yt)} Videos...", "info")
+                whisper_results = phase2_assemblyai(no_yt, workers=5)
             else:
-                tlog(f"⚠️ Whisper nicht verfügbar — {len(no_yt)} Videos ohne Transkript", "warn")
+                tlog(f"⚠️ ASSEMBLYAI_API_KEY nicht gesetzt — {len(no_yt)} Videos ohne Transkript", "warn")
 
         # ── Write transcript file ─────────────────────────────────────────────
         all_text = []
@@ -415,6 +432,20 @@ def run_transcription_bg(slug: str, channel_url: str, max_videos: int):
         tlog(f"🎉 <b>Fertig! {len(all_text)}/{total} Transkripte — {total_words:,} Wörter</b>", "done")
         tlog(f"📊 YouTube: <b>{yt_ok}</b> | Whisper: <b>{wh_ok}</b> | Keine: <b>{total - yt_ok - wh_ok}</b>", "info")
         tlog(f"📄 Gespeichert: {transcript_path}", "file")
+
+        # ── Save to DB ────────────────────────────────────────────────────────
+        try:
+            full_text = transcript_path.read_text(encoding="utf-8")
+            save_knowledge(slug, full_text)
+            # Also update creator config in DB
+            save_creator(slug, {
+                "channel_name": channel_name,
+                "channel_url": channel_url,
+                "video_count": total,
+            })
+            tlog(f"✅ In Datenbank gespeichert", "success")
+        except Exception as e:
+            tlog(f"⚠️ DB-Speicherung fehlgeschlagen: {e}", "warn")
 
     except Exception as e:
         import traceback

@@ -288,60 +288,59 @@ def ensure_faster_whisper():
                 tlog(f"❌ Kein Whisper verfügbar: {e2}", "error")
                 return False
 
-def assemblyai_transcribe(video_id: str) -> str:
-    """Transcribe a YouTube video via AssemblyAI using youtube-transcript-api with different language attempts."""
-    # First try extended transcript API with more language options
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        api = YouTubeTranscriptApi()
-        # Try all available transcripts including auto-generated
-        transcript_list = api.list(video_id)
-        for t in transcript_list:
-            try:
-                snippets = t.fetch()
-                text = " ".join(s.text for s in snippets).strip()
-                if text and len(text) > 100:
-                    return text
-            except:
-                continue
-    except Exception:
-        pass
-
-    # Fallback: AssemblyAI with direct YouTube URL (works for public videos)
-    api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+def supadata_transcribe(video_id: str) -> str:
+    """Transcribe a YouTube video via Supadata API."""
+    api_key = os.environ.get("SUPADATA_API_KEY", "")
     if not api_key:
         return None
     try:
-        headers = {"authorization": api_key, "content-type": "application/json"}
-        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        resp = requests.post(
-            "https://api.assemblyai.com/v2/transcript",
-            headers=headers,
-            json={"audio_url": youtube_url, "language_detection": True},
-            timeout=30
+        resp = requests.get(
+            "https://api.supadata.ai/v1/youtube/transcript",
+            headers={"x-api-key": api_key},
+            params={"videoId": video_id, "text": "true"},
+            timeout=60
         )
         if resp.status_code != 200:
-            print(f"AssemblyAI submit failed for {video_id}: {resp.status_code} {resp.text[:200]}")
+            print(f"Supadata error for {video_id}: {resp.status_code} {resp.text[:200]}")
             return None
-        job_id = resp.json().get("id")
-        if not job_id:
-            return None
-        for _ in range(120):
-            time.sleep(5)
-            poll = requests.get(
-                f"https://api.assemblyai.com/v2/transcript/{job_id}",
-                headers=headers, timeout=30
-            )
-            status = poll.json().get("status")
-            if status == "completed":
-                return poll.json().get("text", "").strip() or None
-            elif status == "error":
-                print(f"AssemblyAI error for {video_id}: {poll.json().get('error')}")
-                return None
-        return None
+        data = resp.json()
+        # Response is either {content: "text"} or {content: [{text: ...}]}
+        content = data.get("content", "")
+        if isinstance(content, list):
+            return " ".join(c.get("text", "") for c in content).strip() or None
+        return str(content).strip() or None
     except Exception as e:
-        print(f"AssemblyAI error for {video_id}: {e}")
+        print(f"Supadata error for {video_id}: {e}")
         return None
+
+
+def phase2_supadata(videos_no_yt: list, workers: int = 5) -> dict:
+    """Phase 2: Supadata transcription for videos without YT subtitles."""
+    results = {}
+    lock = threading.Lock()
+    done_c = [0]
+    total = len(videos_no_yt)
+    tlog(f"🎙️ <b>Phase 2:</b> {total} Videos per Supadata ({workers} parallel)...", "info")
+
+    def worker(video):
+        vid_id = video["id"]
+        text = supadata_transcribe(vid_id)
+        with lock:
+            done_c[0] += 1
+            cnt = done_c[0]
+        short_t = video["title"][:45] + "…" if len(video["title"]) > 45 else video["title"]
+        if text:
+            results[vid_id] = text
+            tlog(f"✅ {cnt}/{total} — {short_t} — <b>{len(text.split()):,} Wörter</b>", "success")
+        else:
+            tlog(f"⚠️ {cnt}/{total} — {short_t} — fehlgeschlagen", "warn")
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(as_completed([ex.submit(worker, v) for v in videos_no_yt]))
+    tlog(f"✅ Phase 2 fertig: {len(results)}/{total} per Supadata", "info")
+    return results
+
 
 def phase2_assemblyai(videos_no_yt: list, workers: int = 5) -> dict:
     """Phase 2: AssemblyAI transcription for videos without YT subtitles."""
@@ -422,15 +421,15 @@ def run_transcription_bg(slug: str, channel_url: str, max_videos: int):
         got_yt = total - len(no_yt)
         tlog(f"📊 Phase 1: <b>{got_yt} mit Untertiteln</b> | <b>{len(no_yt)} ohne</b>", "info")
 
-        # ── Phase 2: AssemblyAI für Videos ohne Untertitel ───────────────────
+        # ── Phase 2: Supadata für Videos ohne Untertitel ─────────────────────
         whisper_results = {}
         if no_yt:
-            assembly_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
-            if assembly_key:
-                tlog(f"🤖 Starte AssemblyAI für {len(no_yt)} Videos...", "info")
-                whisper_results = phase2_assemblyai(no_yt, workers=5)
+            supadata_key = os.environ.get("SUPADATA_API_KEY", "")
+            if supadata_key:
+                tlog(f"🤖 Starte Supadata für {len(no_yt)} Videos...", "info")
+                whisper_results = phase2_supadata(no_yt, workers=5)
             else:
-                tlog(f"⚠️ ASSEMBLYAI_API_KEY nicht gesetzt — {len(no_yt)} Videos ohne Transkript", "warn")
+                tlog(f"⚠️ SUPADATA_API_KEY nicht gesetzt — {len(no_yt)} Videos ohne Transkript", "warn")
 
         # ── Write transcript file ─────────────────────────────────────────────
         all_text = []

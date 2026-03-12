@@ -3980,7 +3980,7 @@ loadConfig();
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    port = 7891
+    port = int(os.environ.get("PORT", 7891))
     print(f"""
 ╔══════════════════════════════════════════════════════╗
 ║   KnowFlow MVP v1.0                                  ║
@@ -4002,9 +4002,10 @@ def main():
         print("   Dann Server neu starten.\n")
     else:
         print(f"  ✅ API Key: ...{api_key[-8:]}\n")
-    threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+    if not os.environ.get("PORT"):  # only open browser locally
+        threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{port}")).start()
     try:
-        HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+        HTTPServer(("0.0.0.0", port), Handler).serve_forever()
     except KeyboardInterrupt:
         print("\n👋 KnowFlow stopped.")
 

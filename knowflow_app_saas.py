@@ -294,9 +294,12 @@ def supadata_transcribe(video_id: str) -> str:
     if not api_key:
         return None
     try:
-        from supadata import Supadata, SupadataError
+        from supadata import Supadata
         client = Supadata(api_key=api_key)
-        transcript = client.youtube.transcript(video_id=video_id, text=True)
+        transcript = client.transcript(
+            url=f"https://www.youtube.com/watch?v={video_id}",
+            text=True
+        )
         content = transcript.content if hasattr(transcript, 'content') else None
         if content and len(str(content)) > 100:
             return str(content).strip()
@@ -328,34 +331,11 @@ def phase2_supadata(videos_no_yt: list, workers: int = 5) -> dict:
             tlog(f"⚠️ {cnt}/{total} — {short_t} — fehlgeschlagen", "warn")
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(as_completed([ex.submit(worker, v) for v in videos_no_yt]))
-    tlog(f"✅ Phase 2 fertig: {len(results)}/{total} per Supadata", "info")
-    return results
-
-
-def phase2_assemblyai(videos_no_yt: list, workers: int = 5) -> dict:
-    """Phase 2: AssemblyAI transcription for videos without YT subtitles."""
-    results = {}
-    lock = threading.Lock()
-    done_c = [0]
-    total = len(videos_no_yt)
-    tlog(f"🎙️ <b>Phase 2:</b> {total} Videos per AssemblyAI ({workers} parallel)...", "info")
-
-    def worker(video):
-        vid_id = video["id"]
-        text = assemblyai_transcribe(vid_id)
-        with lock:
-            results[vid_id] = text
-            done_c[0] += 1
-            cnt = done_c[0]
-        short_t = video["title"][:45] + "…" if len(video["title"]) > 45 else video["title"]
-        if text:
-            tlog(f"🎙️ {cnt}/{total} — {short_t} — <b>{len(text.split()):,} Wörter</b>", "success")
-        else:
-            tlog(f"⚠️ {cnt}/{total} — {short_t} — fehlgeschlagen", "warn")
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = []
+        for v in videos_no_yt:
+            futures.append(ex.submit(worker, v))
+        list(as_completed(futures))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(as_completed([ex.submit(worker, v) for v in videos_no_yt]))
 

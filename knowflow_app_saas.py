@@ -288,24 +288,61 @@ def ensure_faster_whisper():
                 return False
 
 def assemblyai_transcribe(video_id: str) -> str:
-    """Transcribe a YouTube video via AssemblyAI using direct YouTube URL."""
+    """Transcribe a YouTube video via AssemblyAI — download audio first, then upload."""
     api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
     if not api_key:
         return None
+    import tempfile, os as _os
+    tmp_dir = Path(tempfile.mkdtemp())
     try:
         headers = {"authorization": api_key, "content-type": "application/json"}
         youtube_url = f"https://youtube.com/watch?v={video_id}"
-        # Submit job
+
+        # Step 1: Download audio via yt-dlp
+        audio_path = tmp_dir / f"{video_id}.mp3"
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(tmp_dir / f"{video_id}.%(ext)s"),
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "64"}],
+            "quiet": True, "no_warnings": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+
+        # Find downloaded file
+        audio_file = None
+        for f in tmp_dir.iterdir():
+            if f.suffix in [".mp3", ".m4a", ".webm", ".opus"]:
+                audio_file = f
+                break
+        if not audio_file or not audio_file.exists():
+            return None
+
+        # Step 2: Upload to AssemblyAI
+        with open(audio_file, "rb") as f:
+            upload_resp = requests.post(
+                "https://api.assemblyai.com/v2/upload",
+                headers={"authorization": api_key},
+                data=f
+            )
+        if upload_resp.status_code != 200:
+            return None
+        audio_url = upload_resp.json().get("upload_url")
+        if not audio_url:
+            return None
+
+        # Step 3: Submit transcription job
         resp = requests.post("https://api.assemblyai.com/v2/transcript",
             headers=headers,
-            json={"audio_url": youtube_url, "language_detection": True}
+            json={"audio_url": audio_url, "language_detection": True}
         )
         if resp.status_code != 200:
             return None
         job_id = resp.json().get("id")
         if not job_id:
             return None
-        # Poll until done (max 10 min)
+
+        # Step 4: Poll until done (max 10 min)
         for _ in range(120):
             time.sleep(5)
             poll = requests.get(f"https://api.assemblyai.com/v2/transcript/{job_id}", headers=headers)
@@ -315,8 +352,12 @@ def assemblyai_transcribe(video_id: str) -> str:
             elif status == "error":
                 return None
         return None
-    except Exception:
+    except Exception as e:
+        print(f"AssemblyAI error for {video_id}: {e}")
         return None
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def phase2_assemblyai(videos_no_yt: list, workers: int = 5) -> dict:
     """Phase 2: AssemblyAI transcription for videos without YT subtitles."""
@@ -436,13 +477,21 @@ def run_transcription_bg(slug: str, channel_url: str, max_videos: int):
         # ── Save to DB ────────────────────────────────────────────────────────
         try:
             full_text = transcript_path.read_text(encoding="utf-8")
+            # Ensure creator exists in DB before saving knowledge
+            existing = get_creator(slug)
+            if not existing:
+                save_creator(slug, {
+                    "channel_name": channel_name,
+                    "channel_url": channel_url,
+                    "video_count": total,
+                })
+            else:
+                save_creator(slug, {
+                    "channel_name": channel_name,
+                    "channel_url": channel_url,
+                    "video_count": total,
+                })
             save_knowledge(slug, full_text)
-            # Also update creator config in DB
-            save_creator(slug, {
-                "channel_name": channel_name,
-                "channel_url": channel_url,
-                "video_count": total,
-            })
             tlog(f"✅ In Datenbank gespeichert", "success")
         except Exception as e:
             tlog(f"⚠️ DB-Speicherung fehlgeschlagen: {e}", "warn")
@@ -2188,14 +2237,24 @@ async function startTranscription() {
 }
 
 async function startRescan() {
-  const urlInput = document.getElementById('upd-channel-url').value.trim();
+  const urlInput = document.getElementById('upd-channel-url') ? document.getElementById('upd-channel-url').value.trim() : '';
   const slug = currentSlug;
   if (!slug) { alert('Kein aktiver Creator. Bitte zuerst Setup durchführen.'); return; }
   const cfg = await fetch('/api/creator/config?slug='+slug).then(r=>r.json()).catch(()=>({}));
   const url = urlInput || cfg.channel_url || '';
   if (!url) { alert('Bitte Channel-URL eingeben.'); return; }
+  // Show log area
+  const logArea = document.getElementById('log-output');
+  if (logArea) { logArea.innerHTML = ''; logFrom = 0; }
+  const logSection = document.getElementById('log-section');
+  if (logSection) logSection.style.display = 'block';
+  const dot = document.getElementById('log-dot');
+  if (dot) dot.className = 'log-dot running';
+  const status = document.getElementById('log-status');
+  if (status) status.textContent = 'LÄUFT...';
   await fetch('/api/transcribe/start?slug='+slug+'&url='+encodeURIComponent(url)+'&max=30');
-  alert('Re-Scan gestartet. Das dauert einige Minuten — du kannst die Seite im Hintergrund lassen.');
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(pollProgress, 1500);
 }
 
 async function pollProgress() {

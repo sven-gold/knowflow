@@ -1053,11 +1053,9 @@ class Handler(BaseHTTPRequestHandler):
                     creator = get_creator(slug)
                 self.send_json({"user": {"user_id": user_id, "email": email}, "creator": creator or {}})
             except Exception as e:
+                import traceback
+                print(f"❌ auth/me error: {traceback.format_exc()}")
                 self.send_json({"error": str(e)}, 500)
-
-        else:
-            self.send_response(404)
-            self.end_headers()
 
     def do_POST(self):
         p = urlparse(self.path)

@@ -2670,7 +2670,17 @@ async function initAuth() {
     btn.style.display = 'flex';
     btn.title = email;
 
-    // Check subscription status
+    // Get email directly from Clerk user object (reliable)
+    const email = user.primaryEmailAddress?.emailAddress || '';
+    const adminEmail = 'sven.gold.official@gmail.com';
+    const isAdmin = email === adminEmail;
+
+    if (isAdmin) {
+      loadConfig();
+      return;
+    }
+
+    // Check subscription for non-admins
     const token = await window.Clerk.session.getToken();
     const res = await fetch('/api/auth/me', {
       headers: { 'Authorization': 'Bearer ' + token }
@@ -2678,9 +2688,8 @@ async function initAuth() {
     const data = await res.json();
     const creator = data.creator || {};
     const status = creator.subscription_status || 'inactive';
-    const adminEmail = 'sven.gold.official@gmail.com'; // Betreiber — immer Zugang
 
-    if (status !== 'active' && email !== adminEmail) {
+    if (status !== 'active') {
       showPaywall(email, creator.slug || SLUG);
       return;
     }

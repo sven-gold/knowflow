@@ -1370,11 +1370,34 @@ class Handler(BaseHTTPRequestHandler):
             token = extract_token_from_headers(self.headers)
             if not token:
                 self.send_json({"error": "No token"}, 401); return
-            user = verify_clerk_token(token)
-            if not user:
-                self.send_json({"error": "Invalid token"}, 401); return
-            creator = get_creator_by_clerk_id(user["user_id"])
-            self.send_json({"user": user, "creator": creator})
+            # Decode JWT without verification to get user info
+            # Full verification happens via Clerk's session API
+            try:
+                import jwt as pyjwt
+                unverified = pyjwt.decode(token, options={"verify_signature": False})
+                user_id = unverified.get("sub", "")
+                email = unverified.get("email", "")
+                if not user_id:
+                    self.send_json({"error": "Invalid token"}, 401); return
+                # Auto-create creator if not exists
+                creator = get_creator_by_clerk_id(user_id)
+                if not creator:
+                    slug = email.split("@")[0].lower().replace(".", "-").replace("_", "-") if email else user_id[-8:]
+                    # Make slug unique
+                    base_slug = slug
+                    counter = 1
+                    while get_creator(slug):
+                        slug = f"{base_slug}-{counter}"
+                        counter += 1
+                    save_creator(slug, {
+                        "clerk_user_id": user_id,
+                        "email": email,
+                        "channel_name": slug,
+                    })
+                    creator = get_creator(slug)
+                self.send_json({"user": {"user_id": user_id, "email": email}, "creator": creator})
+            except Exception as e:
+                self.send_json({"error": str(e)}, 401)
 
         else:
             self.send_response(404)

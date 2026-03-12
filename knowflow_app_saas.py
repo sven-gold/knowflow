@@ -288,76 +288,59 @@ def ensure_faster_whisper():
                 return False
 
 def assemblyai_transcribe(video_id: str) -> str:
-    """Transcribe a YouTube video via AssemblyAI — download audio first, then upload."""
+    """Transcribe a YouTube video via AssemblyAI using youtube-transcript-api with different language attempts."""
+    # First try extended transcript API with more language options
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        api = YouTubeTranscriptApi()
+        # Try all available transcripts including auto-generated
+        transcript_list = api.list(video_id)
+        for t in transcript_list:
+            try:
+                snippets = t.fetch()
+                text = " ".join(s.text for s in snippets).strip()
+                if text and len(text) > 100:
+                    return text
+            except:
+                continue
+    except Exception:
+        pass
+
+    # Fallback: AssemblyAI with direct YouTube URL (works for public videos)
     api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
     if not api_key:
         return None
-    import tempfile, os as _os
-    tmp_dir = Path(tempfile.mkdtemp())
     try:
         headers = {"authorization": api_key, "content-type": "application/json"}
-        youtube_url = f"https://youtube.com/watch?v={video_id}"
-
-        # Step 1: Download audio via yt-dlp
-        audio_path = tmp_dir / f"{video_id}.mp3"
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": str(tmp_dir / f"{video_id}.%(ext)s"),
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "64"}],
-            "quiet": True, "no_warnings": True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
-
-        # Find downloaded file
-        audio_file = None
-        for f in tmp_dir.iterdir():
-            if f.suffix in [".mp3", ".m4a", ".webm", ".opus"]:
-                audio_file = f
-                break
-        if not audio_file or not audio_file.exists():
-            return None
-
-        # Step 2: Upload to AssemblyAI
-        with open(audio_file, "rb") as f:
-            upload_resp = requests.post(
-                "https://api.assemblyai.com/v2/upload",
-                headers={"authorization": api_key},
-                data=f
-            )
-        if upload_resp.status_code != 200:
-            return None
-        audio_url = upload_resp.json().get("upload_url")
-        if not audio_url:
-            return None
-
-        # Step 3: Submit transcription job
-        resp = requests.post("https://api.assemblyai.com/v2/transcript",
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        resp = requests.post(
+            "https://api.assemblyai.com/v2/transcript",
             headers=headers,
-            json={"audio_url": audio_url, "language_detection": True}
+            json={"audio_url": youtube_url, "language_detection": True},
+            timeout=30
         )
         if resp.status_code != 200:
+            print(f"AssemblyAI submit failed for {video_id}: {resp.status_code} {resp.text[:200]}")
             return None
         job_id = resp.json().get("id")
         if not job_id:
             return None
-
-        # Step 4: Poll until done (max 10 min)
         for _ in range(120):
             time.sleep(5)
-            poll = requests.get(f"https://api.assemblyai.com/v2/transcript/{job_id}", headers=headers)
+            poll = requests.get(
+                f"https://api.assemblyai.com/v2/transcript/{job_id}",
+                headers=headers, timeout=30
+            )
             status = poll.json().get("status")
             if status == "completed":
                 return poll.json().get("text", "").strip() or None
             elif status == "error":
+                print(f"AssemblyAI error for {video_id}: {poll.json().get('error')}")
                 return None
         return None
     except Exception as e:
         print(f"AssemblyAI error for {video_id}: {e}")
         return None
-    finally:
-        import shutil
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def phase2_assemblyai(videos_no_yt: list, workers: int = 5) -> dict:
     """Phase 2: AssemblyAI transcription for videos without YT subtitles."""

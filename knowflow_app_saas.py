@@ -58,8 +58,8 @@ import anthropic
 
 # ── Data storage — now using Postgres ─────────────────────────────────────────
 # Keep DATA_DIR for transcript files (local cache during transcription)
-DATA_DIR = Path("./knowflow_data")
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data/knowflow_data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def creator_dir(slug: str) -> Path:
     d = DATA_DIR / slug

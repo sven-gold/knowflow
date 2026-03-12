@@ -2305,7 +2305,7 @@ async function saveAndLaunch() {
     greeting_video_url: videoUrl || ''
   };
   await fetch('/api/creator/save', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const pageUrl = 'http://localhost:7891/c/'+slug;
+  const pageUrl = window.location.origin + '/c/' + slug;
   document.getElementById('page-url').textContent = pageUrl;
   document.getElementById('open-page-btn').onclick = () => window.open(pageUrl, '_blank');
   document.getElementById('view-page-card').onclick = () => window.open(pageUrl, '_blank');

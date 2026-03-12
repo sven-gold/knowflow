@@ -118,6 +118,13 @@ def get_creator_by_clerk_id(clerk_user_id: str) -> dict:
             row = cur.fetchone()
             return dict(row) if row else {}
 
+def get_creator_by_email(email: str) -> dict:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM creators WHERE email = %s", (email,))
+            row = cur.fetchone()
+            return dict(row) if row else {}
+
 def save_creator(slug: str, data: dict) -> dict:
     """Upsert creator config — only updates fields that are explicitly provided."""
     with get_conn() as conn:

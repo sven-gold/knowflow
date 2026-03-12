@@ -1019,19 +1019,29 @@ class Handler(BaseHTTPRequestHandler):
 
 
         elif p.path == "/api/auth/me":
-            # Accept both token auth and direct user_id param for dev compatibility
-            token = extract_token_from_headers(self.headers)
             user_id = qs.get("user_id", [""])[0]
             email = qs.get("email", [""])[0]
-            try:
+            if not user_id:
+                # Try token as fallback
+                token = extract_token_from_headers(self.headers)
                 if token:
-                    import jwt as pyjwt
-                    unverified = pyjwt.decode(token, options={"verify_signature": False})
-                    user_id = unverified.get("sub", "") or user_id
-                    email = unverified.get("email", "") or email
-                if not user_id:
-                    self.send_json({"error": "No user_id"}, 401); return
+                    try:
+                        import jwt as pyjwt
+                        unverified = pyjwt.decode(token, options={"verify_signature": False})
+                        user_id = unverified.get("sub", "")
+                        email = unverified.get("email", "") or email
+                    except: pass
+            if not user_id:
+                self.send_json({"error": "No user_id"}, 401); return
+            try:
                 creator = get_creator_by_clerk_id(user_id)
+                if not creator and email:
+                    # Fallback: find by email (for creators made before auth system)
+                    creator = get_creator_by_email(email)
+                    if creator:
+                        # Link clerk_user_id to existing creator
+                        save_creator(creator["slug"], {"clerk_user_id": user_id})
+                        creator = get_creator(creator["slug"])
                 if not creator and email:
                     slug = email.split("@")[0].lower().replace(".", "-").replace("_", "-")
                     base_slug = slug
@@ -1043,7 +1053,7 @@ class Handler(BaseHTTPRequestHandler):
                     creator = get_creator(slug)
                 self.send_json({"user": {"user_id": user_id, "email": email}, "creator": creator or {}})
             except Exception as e:
-                self.send_json({"error": str(e)}, 401)
+                self.send_json({"error": str(e)}, 500)
 
         else:
             self.send_response(404)

@@ -2785,8 +2785,9 @@ async function doLogout() {
 // Handle payment success redirect
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get('payment') === 'success') {
-  // Wait for webhook to process, then reload
-  setTimeout(() => window.location.reload(), 4000);
+  // Clean up URL without reload
+  const cleanUrl = window.location.pathname + '?slug=' + SLUG;
+  window.history.replaceState({}, '', cleanUrl);
 }
 
 // Start auth check then load

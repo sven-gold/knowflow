@@ -2669,9 +2669,6 @@ async function initAuth() {
     const btn = document.getElementById('btn-logout');
     btn.style.display = 'flex';
     btn.title = email;
-
-    // Get email directly from Clerk user object (reliable)
-    const email = user.primaryEmailAddress?.emailAddress || '';
     const adminEmail = 'sven.gold.official@gmail.com';
     const isAdmin = email === adminEmail;
 
@@ -2696,8 +2693,15 @@ async function initAuth() {
 
     loadConfig();
   } catch(e) {
-    console.warn('Auth check failed, loading anyway:', e);
-    loadConfig();
+    console.warn('Auth check error:', e);
+    // Don't silently allow access — show paywall on error
+    const emailFallback = window.Clerk?.user?.primaryEmailAddress?.emailAddress || '';
+    const adminEmail = 'sven.gold.official@gmail.com';
+    if (emailFallback === adminEmail) {
+      loadConfig();
+    } else {
+      showPaywall(emailFallback, SLUG);
+    }
   }
 }
 

@@ -1508,14 +1508,15 @@ window.addEventListener('load', async () => {
   await window.Clerk.load();
   const user = window.Clerk.user;
   if (!user) { window.location.href='/login'; return; }
-  const token = await window.Clerk.session.getToken();
+  const email = user.primaryEmailAddress?.emailAddress||'';
+  const userId = user.id||'';
+  const slug = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g,'-');
   try {
-    const res = await fetch('/api/auth/me', { headers: {'Authorization':'Bearer '+token} });
+    const res = await fetch(`/api/auth/me?user_id=${encodeURIComponent(userId)}&email=${encodeURIComponent(email)}`);
     const d = await res.json();
     if (d.creator && d.creator.slug) { window.location.href='/admin?slug='+d.creator.slug; return; }
   } catch(e) {}
-  const email = user.primaryEmailAddress?.emailAddress||'';
-  window.location.href='/admin?slug='+email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g,'-');
+  window.location.href='/admin?slug='+slug;
 });
 </script>
 </body></html>"""

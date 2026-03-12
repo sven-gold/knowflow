@@ -862,7 +862,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
     def send_json(self, data, status=200):
-        body = json.dumps(data, ensure_ascii=False).encode()
+        import datetime
+        def default_serializer(obj):
+            if isinstance(obj, (datetime.datetime, datetime.date)):
+                return obj.isoformat()
+            raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
+        body = json.dumps(data, ensure_ascii=False, default=default_serializer).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")

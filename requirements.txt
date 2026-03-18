@@ -8,3 +8,6 @@ PyJWT
 cryptography
 requests
 supadata
+openpyxl
+pypdf
+python-docx

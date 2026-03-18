@@ -1142,6 +1142,165 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(e)}, 400)
             return
 
+        # ── Multipart endpoints (must be read before read_body()) ─────────────
+        if p.path == "/api/knowledge/upload":
+            ctype = self.headers.get("Content-Type", "")
+            if "multipart/form-data" not in ctype:
+                self.send_json({"error": "Expected multipart/form-data"}, 400)
+                return
+            try:
+                import io as _io
+                clen = int(self.headers.get("Content-Length", 0))
+                fields = parse_multipart(self.rfile, ctype, clen)
+                slug = fields.get("slug", "")
+                source = fields.get("source", "file")
+                file_info = fields.get("file", {})
+                if not slug or not isinstance(file_info, dict) or not file_info.get("filename"):
+                    self.send_json({"error": "Missing slug or file"}, 400)
+                    return
+                raw = file_info["data"]
+                fname = file_info["filename"]
+                fname_lower = fname.lower()
+                text = ""
+                method = "unknown"
+
+                if fname_lower.endswith((".txt", ".md", ".rtf")):
+                    try: text = raw.decode("utf-8")
+                    except: text = raw.decode("latin-1", errors="ignore")
+                    method = "plaintext"
+
+                elif fname_lower.endswith(".csv"):
+                    try: text = raw.decode("utf-8")
+                    except: text = raw.decode("latin-1", errors="ignore")
+                    method = "csv"
+
+                elif fname_lower.endswith(".pdf"):
+                    try:
+                        import pypdf
+                        reader = pypdf.PdfReader(_io.BytesIO(raw))
+                        pages = [pg.extract_text() or "" for pg in reader.pages]
+                        text = "\n\n".join(pg.strip() for pg in pages if pg.strip())
+                        method = f"pypdf ({len(reader.pages)} Seiten)"
+                    except Exception as pdf_err:
+                        import re as _re
+                        decoded = raw.decode("latin-1", errors="ignore")
+                        runs = _re.findall(r'[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß0-9\s,.\-:!?()]{12,}', decoded)
+                        text = " ".join(runs)
+                        method = f"pdf-regex ({pdf_err})"
+
+                elif fname_lower.endswith(".docx"):
+                    try:
+                        import docx as _docx
+                        doc = _docx.Document(_io.BytesIO(raw))
+                        paras = [p2.text for p2 in doc.paragraphs if p2.text.strip()]
+                        for tbl in doc.tables:
+                            for row in tbl.rows:
+                                for cell in row.cells:
+                                    if cell.text.strip(): paras.append(cell.text.strip())
+                        text = "\n".join(paras)
+                        method = "python-docx"
+                    except Exception as docx_err:
+                        import zipfile, re as _re
+                        try:
+                            z = zipfile.ZipFile(_io.BytesIO(raw))
+                            xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
+                            text = " ".join(_re.findall(r'<w:t[^>]*>([^<]+)</w:t>', xml))
+                            method = "docx-xml-fallback"
+                        except:
+                            text = raw.decode("utf-8", errors="ignore")
+                            method = "docx-raw"
+
+                elif fname_lower.endswith((".xlsx", ".xls")):
+                    try:
+                        import openpyxl
+                        wb = openpyxl.load_workbook(_io.BytesIO(raw), read_only=True, data_only=True)
+                        rows = []
+                        for ws in wb.worksheets:
+                            rows.append(f"## Sheet: {ws.title}")
+                            for row in ws.iter_rows(values_only=True):
+                                cells = [str(c) for c in row if c is not None]
+                                if cells: rows.append(" | ".join(cells))
+                        text = "\n".join(rows)
+                        method = "openpyxl"
+                    except Exception as xl_err:
+                        self.send_json({"error": f"Excel-Fehler: {xl_err}. Bitte als CSV exportieren."}, 400)
+                        return
+
+                elif fname_lower.endswith((".html", ".htm")):
+                    import re as _re
+                    decoded = raw.decode("utf-8", errors="ignore")
+                    text = _re.sub(r'<[^>]+>', ' ', decoded)
+                    text = _re.sub(r'\s+', ' ', text).strip()
+                    method = "html-strip"
+
+                elif fname_lower.endswith(".json"):
+                    import json as _json
+                    try: text = _json.dumps(_json.loads(raw.decode("utf-8")), ensure_ascii=False, indent=2)
+                    except: text = raw.decode("utf-8", errors="ignore")
+                    method = "json"
+
+                elif fname_lower.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    try:
+                        import base64, anthropic as _anthropic
+                        api_key_val = os.environ.get("ANTHROPIC_API_KEY", "")
+                        if not api_key_val:
+                            self.send_json({"error": "Kein API Key für Bildverarbeitung"}, 400)
+                            return
+                        client = _anthropic.Anthropic(api_key=api_key_val)
+                        b64 = base64.standard_b64encode(raw).decode("utf-8")
+                        media_type = "image/jpeg" if fname_lower.endswith((".jpg", ".jpeg")) else f"image/{fname_lower.split('.')[-1]}"
+                        msg = client.messages.create(
+                            model="claude-sonnet-4-20250514",
+                            max_tokens=2048,
+                            messages=[{"role": "user", "content": [
+                                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                                {"type": "text", "text": "Extract ALL text and information from this image. Include everything visible."}
+                            ]}]
+                        )
+                        text = msg.content[0].text
+                        method = "claude-vision"
+                    except Exception as img_err:
+                        self.send_json({"error": f"Bildverarbeitung fehlgeschlagen: {img_err}"}, 400)
+                        return
+
+                else:
+                    try: text = raw.decode("utf-8", errors="ignore")
+                    except: text = ""
+                    method = "raw-utf8"
+
+                text = text.strip()
+                if not text or len(text) < 30:
+                    self.send_json({"error": f"Kein Text aus '{fname}' extrahierbar (Methode: {method})."}, 400)
+                    return
+
+                if len(text) > 200000:
+                    text = text[:200000] + "\n[... abgeschnitten]"
+
+                timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+                sep = f"\n\n{'='*60}\n## {fname} ({source.upper()}) — {timestamp}\n{'='*60}\n\n"
+                full_addition = sep + text + "\n"
+
+                # Save to local file
+                creator_dir(slug).mkdir(parents=True, exist_ok=True)
+                transcript_path = creator_dir(slug) / "transcript.txt"
+                with open(transcript_path, "a", encoding="utf-8") as f2:
+                    f2.write(full_addition)
+
+                # Save to DB
+                try:
+                    existing = get_knowledge(slug)
+                    combined = (existing or "") + full_addition
+                    save_knowledge(slug, combined)
+                except Exception as db_err:
+                    print(f"⚠️ DB save failed: {db_err}")
+
+                self.send_json({"ok": True, "words": len(text.split()), "chars": len(text), "filename": fname, "method": method})
+            except Exception as e:
+                import traceback
+                print(f"❌ Upload error: {traceback.format_exc()}")
+                self.send_json({"error": str(e)}, 500)
+            return
+
         data = self.read_body()
 
         if p.path == "/api/creator/save":
@@ -1275,107 +1434,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "words_added": len(new_text.split())})
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
-
-        elif p.path == "/api/knowledge/upload":
-            ctype = self.headers.get("Content-Type", "")
-            if "multipart/form-data" not in ctype:
-                self.send_json({"error": "Expected multipart/form-data"}, 400)
-                return
-            try:
-                import io as _io
-                clen = int(self.headers.get("Content-Length", 0))
-                fields = parse_multipart(self.rfile, ctype, clen)
-                slug = fields.get("slug", "")
-                source = fields.get("source", "file")
-                file_info = fields.get("file", {})
-                if not slug or not isinstance(file_info, dict) or not file_info.get("filename"):
-                    self.send_json({"error": "Missing slug or file"}, 400)
-                    return
-                raw = file_info["data"]
-                fname = file_info["filename"]
-                fname_lower = fname.lower()
-                text = ""
-                method = "unknown"
-
-                if fname_lower.endswith((".txt", ".md", ".csv", ".rtf")):
-                    try: text = raw.decode("utf-8")
-                    except: text = raw.decode("latin-1", errors="ignore")
-                    method = "plaintext"
-
-                elif fname_lower.endswith(".pdf"):
-                    try:
-                        import pypdf
-                        reader = pypdf.PdfReader(_io.BytesIO(raw))
-                        pages = [pg.extract_text() or "" for pg in reader.pages]
-                        text = "\n\n".join(pg.strip() for pg in pages if pg.strip())
-                        method = f"pypdf ({len(reader.pages)} pages)"
-                    except Exception as pdf_err:
-                        import re as _re
-                        decoded = raw.decode("latin-1", errors="ignore")
-                        runs = _re.findall(r'[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß0-9\s,.\-:!?()]{12,}', decoded)
-                        text = " ".join(runs)
-                        method = f"pdf-regex ({pdf_err})"
-
-                elif fname_lower.endswith(".docx"):
-                    try:
-                        import docx as _docx
-                        doc = _docx.Document(_io.BytesIO(raw))
-                        paras = [p.text for p in doc.paragraphs if p.text.strip()]
-                        for tbl in doc.tables:
-                            for row in tbl.rows:
-                                for cell in row.cells:
-                                    if cell.text.strip(): paras.append(cell.text.strip())
-                        text = "\n".join(paras)
-                        method = "python-docx"
-                    except Exception as docx_err:
-                        import zipfile, re as _re
-                        try:
-                            z = zipfile.ZipFile(_io.BytesIO(raw))
-                            xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
-                            text = " ".join(_re.findall(r'<w:t[^>]*>([^<]+)</w:t>', xml))
-                            method = "docx-xml-fallback"
-                        except:
-                            text = raw.decode("utf-8", errors="ignore")
-                            method = "docx-raw"
-
-                elif fname_lower.endswith((".html", ".htm")):
-                    import re as _re
-                    decoded = raw.decode("utf-8", errors="ignore")
-                    text = _re.sub(r'<[^>]+>', ' ', decoded)
-                    text = _re.sub(r'\s+', ' ', text).strip()
-                    method = "html-strip"
-
-                elif fname_lower.endswith(".json"):
-                    import json as _json
-                    try: text = _json.dumps(_json.loads(raw.decode("utf-8")), ensure_ascii=False, indent=2)
-                    except: text = raw.decode("utf-8", errors="ignore")
-                    method = "json"
-
-                else:
-                    text = raw.decode("utf-8", errors="ignore")
-                    method = "raw-utf8"
-
-                text = text.strip()
-                if not text or len(text) < 30:
-                    self.send_json({"error": f"Kein Text aus '{fname}' extrahierbar (Methode: {method}). Bitte als TXT exportieren."}, 400)
-                    return
-
-                if len(text) > 200000:
-                    text = text[:200000] + "\n[... bei 200k Zeichen abgeschnitten]"
-
-                transcript_path = creator_dir(slug) / "transcript.txt"
-                timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
-                sep = f"\n\n{'='*60}\n## {fname} ({source.upper()}) — {timestamp}\n{'='*60}\n\n"
-                with open(transcript_path, "a", encoding="utf-8") as f2:
-                    f2.write(sep + text + "\n")
-                cfg2 = load_json(creator_dir(slug) / "config.json", {})
-                cfg2["last_knowledge_update"] = timestamp
-                cfg2["has_knowledge"] = True
-                save_json(creator_dir(slug) / "config.json", cfg2)
-                self.send_json({"ok": True, "words": len(text.split()), "chars": len(text), "filename": fname, "method": method})
-            except Exception as e:
-                import traceback
-                self.send_json({"error": str(e), "trace": traceback.format_exc()[-500:]}, 500)
 
         elif p.path == "/api/greeting-video/upload":
             # Handle multipart form upload
@@ -2491,6 +2549,15 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
     <div class="btn-row"><button class="btn-p" onclick="saveProds()">💾 Produkte speichern</button></div>
   </div>
 
+  <!-- LINKS -->
+  <div class="card">
+    <div class="card-title">🔗 Links & Ressourcen</div>
+    <p style="font-size:12px;color:var(--t3);margin-bottom:12px">Links die auf deiner Seite als Buttons erscheinen (z.B. Freebie, Webseite, Instagram).</p>
+    <div id="link-list"></div>
+    <button class="btn-add" onclick="addLink()">+ Link hinzufügen</button>
+    <div class="btn-row"><button class="btn-p" onclick="saveLinks()">💾 Links speichern</button></div>
+  </div>
+
   <!-- DATEIEN -->
   <div class="card">
     <div class="card-title">🧠 Wissensquellen — Dateien <span class="badge">hinzufügen</span></div>
@@ -2498,20 +2565,20 @@ textarea{resize:vertical;min-height:72px;line-height:1.6}
     <div class="uploaded" id="ulist"></div>
     <div class="drop-grid">
       <div class="dz" id="dz-book" onclick="document.getElementById('fi-book').click()">
-        <input type="file" id="fi-book" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf" onchange="uploadFile(event,'book','📖')">
-        <div class="dz-ico">📖</div><div class="dz-lbl">Buch / Skript</div><div class="dz-sub">PDF · DOCX · TXT</div>
+        <input type="file" id="fi-book" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf,.xlsx,.xls" onchange="uploadFile(event,'book','📖')">
+        <div class="dz-ico">📖</div><div class="dz-lbl">Buch / Skript</div><div class="dz-sub">PDF · DOCX · TXT · Excel</div>
       </div>
       <div class="dz" id="dz-podcast" onclick="document.getElementById('fi-podcast').click()">
-        <input type="file" id="fi-podcast" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf" onchange="uploadFile(event,'podcast','🎙️')">
+        <input type="file" id="fi-podcast" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf,.xlsx" onchange="uploadFile(event,'podcast','🎙️')">
         <div class="dz-ico">🎙️</div><div class="dz-lbl">Podcast / Interview</div><div class="dz-sub">TXT · DOCX · PDF</div>
       </div>
       <div class="dz" id="dz-faq" onclick="document.getElementById('fi-faq').click()">
-        <input type="file" id="fi-faq" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf" onchange="uploadFile(event,'faq','💬')">
-        <div class="dz-ico">💬</div><div class="dz-lbl">FAQ / Sales-Calls</div><div class="dz-sub">PDF · TXT · DOCX</div>
+        <input type="file" id="fi-faq" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf,.png,.jpg,.jpeg" onchange="uploadFile(event,'faq','💬')">
+        <div class="dz-ico">💬</div><div class="dz-lbl">FAQ / Screenshot</div><div class="dz-sub">PDF · TXT · PNG · JPG</div>
       </div>
       <div class="dz" id="dz-other" onclick="document.getElementById('fi-other').click()">
-        <input type="file" id="fi-other" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf,.json" onchange="uploadFile(event,'other','📄')">
-        <div class="dz-ico">📄</div><div class="dz-lbl">Sonstiges</div><div class="dz-sub">HTML · CSV · JSON</div>
+        <input type="file" id="fi-other" style="display:none" accept=".pdf,.txt,.md,.docx,.html,.csv,.rtf,.json,.xlsx,.png,.jpg,.jpeg,.webp" onchange="uploadFile(event,'other','📄')">
+        <div class="dz-ico">📄</div><div class="dz-lbl">Sonstiges</div><div class="dz-sub">HTML · CSV · JSON · Bild</div>
       </div>
     </div>
   </div>
@@ -2583,6 +2650,7 @@ async function loadConfig() {
   document.getElementById('sp').textContent = (cfg.products || []).filter(p => p.name).length || '—';
   document.getElementById('su').textContent = cfg.last_knowledge_update || '—';
   renderProds(cfg.products || []);
+  renderLinks(cfg.links || []);
 }
 
 function renderProds(prods) {
@@ -2605,14 +2673,39 @@ function addProd() {
 function getProds() {
   return [...document.querySelectorAll('#prod-list .prod-row')].map(r => ({name:r.querySelector('.pn').value.trim(),url:r.querySelector('.pu').value.trim()})).filter(p=>p.name);
 }
+function addLink() {
+  const el = document.getElementById('link-list');
+  const row = document.createElement('div'); row.className = 'prod-row';
+  row.innerHTML = '<input type="text" class="ln" placeholder="Label (z.B. Instagram)"><input type="text" class="lu" placeholder="https://..."><button class="btn-rm" onclick="this.parentElement.remove()">×</button>';
+  el.appendChild(row); row.querySelector('.ln').focus();
+}
+function getLinks() {
+  return [...document.querySelectorAll('#link-list .prod-row')].map(r => ({label:r.querySelector('.ln').value.trim(),url:r.querySelector('.lu').value.trim()})).filter(l=>l.label);
+}
+function renderLinks(links) {
+  const el = document.getElementById('link-list');
+  if (!el) return;
+  el.innerHTML = '';
+  (links||[]).forEach(l => {
+    const row = document.createElement('div'); row.className = 'prod-row';
+    row.innerHTML = '<input type="text" class="ln" placeholder="Label" value="'+escHtml(l.label||'')+'"><input type="text" class="lu" placeholder="https://..." value="'+escHtml(l.url||'')+'"><button class="btn-rm" onclick="this.parentElement.remove()">×</button>';
+    el.appendChild(row);
+  });
+}
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+async function saveLinks() {
+  const links = getLinks();
+  const r = await fetch('/api/creator/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slug:SLUG,links})}).then(r=>r.json()).catch(()=>null);
+  if (r && r.ok) toast('✅ Links gespeichert'); else toast('❌ Fehler','err');
+}
 
 function baseBody() {
   const prods = getProds();
+  const links = getLinks();
   const body = { slug: SLUG };
-  // Only send products if there are any — prevents accidental clearing
-  // If user explicitly removed all products, they need to save with the products card button
-  if (prods.length > 0) body.products = prods;
-  
+  body.products = prods;
+  body.links = links;
+
   const fields = {
     channel_name: 'f-brand',
     bio: 'f-bio',
@@ -2623,7 +2716,7 @@ function baseBody() {
   };
   for (const [key, id] of Object.entries(fields)) {
     const el = document.getElementById(id);
-    if (el && el.value.trim()) body[key] = el.value.trim();
+    if (el) body[key] = el.value.trim();
   }
   if (!body.greeting_video_url) body.greeting_video_url = '';
   return body;
@@ -2649,10 +2742,10 @@ async function post(body) {
   return r && r.ok;
 }
 
-async function saveProfile() { if(await post(baseBody())) toast('✅ Profil gespeichert'); else toast('❌ Fehler','err'); }
-async function saveVideo() { if(await post(baseBody())) toast('✅ Video gespeichert'); else toast('❌ Fehler','err'); }
-async function removeVideo() { document.getElementById('f-video').value=''; document.getElementById('vwrap').style.display='none'; document.getElementById('viframe').src=''; await post(baseBody()); toast('Video entfernt'); }
-async function saveProds() { await saveProdsExplicit(); }
+async function saveProfile() { if(await post(baseBody())) { toast('✅ Profil gespeichert'); await loadConfig(); } else toast('❌ Fehler','err'); }
+async function saveVideo() { if(await post(baseBody())) { toast('✅ Video gespeichert'); await loadConfig(); } else toast('❌ Fehler','err'); }
+async function removeVideo() { document.getElementById('f-video').value=''; document.getElementById('vwrap').style.display='none'; document.getElementById('viframe').src=''; await post(baseBody()); await loadConfig(); toast('Video entfernt'); }
+async function saveProds() { await saveProdsExplicit(); await loadConfig(); }
 
 async function uploadFile(e, source, icon) {
   const file = e.target.files[0]; if (!file) return;
@@ -3609,7 +3702,19 @@ async function loadConfig() {
           cls: '',
           icon: '<svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>',
           label: p.name,
-          sub: 'Angebot'
+          sub: p.description || 'Angebot'
+        });
+      });
+    }
+
+    if (cfg.links) {
+      cfg.links.filter(l=>l.label).forEach(l => {
+        buttons.push({
+          href: l.url||'#',
+          cls: '',
+          icon: '<svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>',
+          label: l.label,
+          sub: l.sub || ''
         });
       });
     }

@@ -51,6 +51,7 @@ def init_db():
                     booking_link TEXT,
                     greeting_video_url TEXT,
                     products JSONB DEFAULT '[]',
+                    links JSONB DEFAULT '[]',
                     video_count INTEGER DEFAULT 0,
                     last_updated TIMESTAMPTZ DEFAULT NOW(),
                     stripe_customer_id TEXT,
@@ -59,6 +60,9 @@ def init_db():
                     plan TEXT DEFAULT 'free',
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
+
+                -- Add links column if not exists (migration)
+                ALTER TABLE creators ADD COLUMN IF NOT EXISTS links JSONB DEFAULT '[]';
 
                 CREATE TABLE IF NOT EXISTS knowledge_base (
                     id SERIAL PRIMARY KEY,
@@ -136,8 +140,8 @@ def save_creator(slug: str, data: dict) -> dict:
             if not exists:
                 cur.execute("""
                     INSERT INTO creators (slug, channel_name, channel_url, bio, avatar,
-                        booking_link, greeting_video_url, products, clerk_user_id, email)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        booking_link, greeting_video_url, products, links, clerk_user_id, email)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     slug,
                     data.get("channel_name", slug),
@@ -147,6 +151,7 @@ def save_creator(slug: str, data: dict) -> dict:
                     data.get("booking_link", ""),
                     data.get("greeting_video_url", ""),
                     json.dumps(data.get("products", [])),
+                    json.dumps(data.get("links", [])),
                     data.get("clerk_user_id"),
                     data.get("email"),
                 ))
@@ -167,14 +172,17 @@ def save_creator(slug: str, data: dict) -> dict:
                 }
                 for key, col in field_map.items():
                     if key in data and data[key] is not None:
-                        if data[key] != "" or key in ("greeting_video_url", "video_count"):
-                            updates.append(f"{col} = %s")
-                            values.append(data[key])
+                        updates.append(f"{col} = %s")
+                        values.append(data[key])
 
-                # Products handled separately
-                if "products" in data and (data["products"] or data.get("clear_products")):
+                # JSONB fields — products and links
+                if "products" in data and data["products"] is not None:
                     updates.append("products = %s")
                     values.append(json.dumps(data["products"]))
+
+                if "links" in data and data["links"] is not None:
+                    updates.append("links = %s")
+                    values.append(json.dumps(data["links"]))
 
                 if updates:
                     updates.append("last_updated = NOW()")
